@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 FEE_WALLET = os.getenv("FEE_WALLET", "UQAg3mG5c-QFD_KQQBzJMkd94y_r5pkAFegBijQr3LEbBWZ2")
 TON_API_KEY = os.getenv("TON_API_KEY")
-ESCROW_PRIVATE_KEY = os.getenv("ESCROW_PRIVATE_KEY", "49cb6e50b55a3f86417cffb7c6aa37daa178ee0ed3c829e4c01fda2a84e1cb23")
 
 # Validate required environment variables
 if not BOT_TOKEN:
@@ -83,39 +82,19 @@ def is_valid_ton_address(address: str) -> bool:
         return False
 
 def generate_escrow_wallet() -> Dict[str, Any]:
-    """Generate a real TON wallet address for escrow using fixed private key"""
+    """Generate a real TON wallet address for escrow using pytoniq-core"""
     try:
         # Import required libraries
-        from pytoniq import WalletV4R2
-        from pytoniq_core import Address, Cell
-        from pytoniq_core.crypto.keys import private_key_to_public_key
-        import hashlib
-
-        # Use the fixed private key for consistent escrow wallet
-        private_key_bytes = bytes.fromhex(ESCROW_PRIVATE_KEY)
+        from pytoniq_core import WalletV4R2, Address
         
-        # Generate public key from private key
-        public_key = private_key_to_public_key(private_key_bytes)
+        # Generate a new random private key (32 bytes)
+        private_key_bytes = secrets.token_bytes(32)
         
-        # Create wallet V4R2 state init
-        from pytoniq_core.contract import Contract
-        from pytoniq_core.boc import Cell as BocCell
+        # Create wallet using pytoniq-core (not pytoniq)
+        wallet = WalletV4R2(private_key=private_key_bytes, workchain=0)
         
-        # Wallet V4R2 code hash (standard)
-        wallet_code = Cell.one_from_boc("te6cckECFAEAAtQAART/APSkE/S88sgLAQIBIAIDAgFIBAUE+PKDCNcYINMf0x/THwL4I7vyZO1E0NMf0x/T//QE0VFDuvKhUVG68qIF+QFUEGT5EPKj+AAkpMjLH1JAyx9SMMv/UhD0AMntVPgPAdMHIcAAn2xRkyDXSpbTB9QC+wDoMOAhwAHjACHAAuMAAcADkTDjDQOkyMsfEssfy/8QERITAubQAdDTAyFxsJJfBOAi10nBIJJfBOAC0x8hghBwbHVnvSKCEGRzdHK9sJJfBeAD+kAwIPpEAcjKB8v/ydDtRNCBAUDXIfQEMFyBAQj0Cm+hMbOSXwfgBdM/yCWCEHBsdWe6kjgw4w0DghBkc3RyupJfBuMNBgcCASAICQB4AfoA9AQw+CdvIjBQCqEhvvLgUIIQcGx1Z4MesXCAGFAEywUmzxZY+gIZ9ADLaRfLH1Jgyz8gyYBA+wAGAIpQBIEBCPRZMO1E0IEBQNcgyAHPFvQAye1U+A8B0wchwACfbFGTINdKltMH1AL7AOgw4CHAAeMAIcAC4wABwAORMOMNA6TIyx8Syx/L/wIBIAoLAFm9JCtvaiaECAoGuQ+gIYRw1AgIR6STfSmRDOaQPp/5g3gSgBt4EBSJhxWfMYQCAVgMDQARuMl+1E0NcLH4AD2ynftRNCBAUDXIfQEMALIygfL/8nQAYEBCPQKb6ExgAgEgDg8AE7UTQ0wfXGAg10nCAI4/+A8B0wchwACfbFGTINdKltMH1AL7AOgw4CHAAeMAIcAC4wABwAORMOMNA6TIyx8Syx/L/83gVwf1AwE6APYALPhGMO1E0NMf0x/T//QE0W1tAvQC0x/TH9Mf0x/TH9IfzYBA")
-        
-        # Create wallet state init
-        wallet_data = Cell().store_uint(0, 32).store_uint(0, 32).store_bytes(public_key).store_uint(0, 1).end_cell()
-        state_init = Cell().store_uint(0, 2).store_dict(None).store_dict({b'\x00': wallet_code}).store_dict({b'\x00': wallet_data}).store_uint(0, 1).end_cell()
-        
-        # Calculate address
-        address_hash = state_init.hash()
-        address = Address((0, address_hash))  # workchain 0 for mainnet
-        
-        # Create wallet instance
-        wallet = WalletV4R2(private_key_bytes, address)
-        
-        # Convert to user-friendly format
+        # Get the wallet address
+        address = wallet.address
         address_str = address.to_str(is_user_friendly=True, is_bounceable=False)
         
         # Validate the generated address
@@ -130,7 +109,7 @@ def generate_escrow_wallet() -> Dict[str, Any]:
             "wallet_address": address
         }
 
-        logger.info(f"Successfully generated consistent TON escrow wallet: {address_str}")
+        logger.info(f"Successfully generated new unique TON escrow wallet: {address_str}")
         return wallet_info
 
     except Exception as e:
@@ -222,26 +201,19 @@ async def send_ton_payment(from_wallet: Dict[str, Any], to_address: str, amount_
 
         try:
             # Connect to TON network via LiteBalancer
-            provider = LiteBalancer.from_mainnet_config(1)
+            provider = LiteBalancer.from_mainnet_config(trust_level=1)
             await provider.start_up()
 
-            # Get current seqno
-            seqno = await wallet.get_seqno(provider)
-            logger.info(f"Current wallet seqno: {seqno}")
-
-            # Create and send transaction
-            await wallet.transfer(
-                provider,
-                [
-                    {
-                        "address": to_addr,
-                        "amount": amount_nano,
-                        "payload": None,
-                        "send_mode": 3,
-                    }
-                ],
-                seqno=seqno
+            # Create transfer message
+            transfer_body = wallet.create_transfer_msg(
+                to_addr=to_addr,
+                amount=amount_nano,
+                seqno=await wallet.get_seqno(provider),
+                send_mode=3
             )
+
+            # Send the transaction
+            await provider.send_message(transfer_body)
 
             # Wait for transaction confirmation
             await asyncio.sleep(10)  # Wait for block confirmation
@@ -787,11 +759,11 @@ async def main():
 
         # Validate TON library
         try:
-            from pytoniq import WalletV4R2, LiteBalancer
-            from pytoniq_core import Address
-            logger.info("✅ pytoniq library available - real TON wallets enabled")
+            from pytoniq import LiteBalancer
+            from pytoniq_core import WalletV4R2, Address
+            logger.info("✅ pytoniq libraries available - real TON wallets enabled")
         except ImportError as e:
-            logger.error(f"❌ pytoniq library not found: {e}")
+            logger.error(f"❌ pytoniq libraries not found: {e}")
             logger.error("Please install: pip install pytoniq pytoniq-core")
             return
 
@@ -804,6 +776,7 @@ async def main():
         try:
             test_wallet = generate_escrow_wallet()
             logger.info(f"✅ Escrow wallet generation test successful: {test_wallet['address']}")
+            logger.info(f"✅ Each escrow will use a unique wallet address")
         except Exception as e:
             logger.error(f"❌ Escrow wallet generation failed: {e}")
             return
@@ -818,8 +791,8 @@ async def main():
 
         logger.info(f"✅ Configuration validated")
         logger.info(f"✅ Fee wallet: {FEE_WALLET}")
-        logger.info(f"✅ Escrow private key: {ESCROW_PRIVATE_KEY[:8]}...")
         logger.info(f"✅ Service fee: {int(FEE_PERCENTAGE * 100)}%")
+        logger.info(f"✅ Unique wallet generation: ENABLED")
         logger.info("✅ Ready for live transactions!")
 
         # Start bot
